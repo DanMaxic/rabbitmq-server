@@ -33,6 +33,9 @@ all() ->
     ].
 
 groups() ->
+    MaxLengthTests = [max_length_drop_head,
+                      max_length_reject_confirm,
+                      max_length_drop_publish],
     [
       {parallel_tests, [parallel], [
           amqp_connection_refusal,
@@ -49,9 +52,9 @@ groups() ->
           set_disk_free_limit_command,
           set_vm_memory_high_watermark_command,
           topic_matching,
-          {queue_max_length, [], [max_length_drop_head,
-                                  max_length_reject_confirm,
-                                  max_length_drop_publish]}
+          {queue_max_length, [], [
+            {max_length_simple, [], MaxLengthTests},
+            {max_length_mirrored, [], MaxLengthTests}]}
         ]}
     ].
 
@@ -66,6 +69,11 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(max_length_mirrored, Config) ->
+    rabbit_ct_broker_helpers:set_ha_policy(Config, 0, <<"^max_length.*queue">>,
+        <<"all">>, [{<<"ha-sync-mode">>, <<"automatic">>}]),
+    Config1 = rabbit_ct_helpers:set_config(Config, [{is_mirrored, true}]),
+    rabbit_ct_helpers:run_steps(Config1, []);
 init_per_group(Group, Config) ->
     case lists:member({group, Group}, all()) of
         true ->
@@ -94,6 +102,10 @@ setup_file_handle_cache1() ->
     ok = file_handle_cache:set_limit(10),
     ok.
 
+end_per_group(max_length_mirrored, Config) ->
+    rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"^max_length.*queue">>),
+    Config1 = rabbit_ct_helpers:set_config(Config, [{is_mirrored, false}]),
+    Config1;
 end_per_group(queue_max_length, Config) ->
     {_, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
     amqp_channel:call(Ch, #'queue.delete'{queue = <<"max_length_reject_queue">>}),
@@ -1048,15 +1060,15 @@ max_length_drop_head(Config) ->
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameBytes, arguments = MaxLengthBytesArgs ++ OverflowArgs}),
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameDefaultBytes, arguments = MaxLengthBytesArgs}),
 
-    check_max_length_drops_head(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
-    check_max_length_drops_head(QNameDefault, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_drops_head(Config, QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_drops_head(Config, QNameDefault, Ch, <<"1">>, <<"2">>, <<"3">>),
 
     %% 80 bytes payload
     Payload1 = << <<"1">> || _ <- lists:seq(1, 80) >>,
     Payload2 = << <<"2">> || _ <- lists:seq(1, 80) >>,
     Payload3 = << <<"3">> || _ <- lists:seq(1, 80) >>,
-    check_max_length_drops_head(QName, Ch, Payload1, Payload2, Payload3),
-    check_max_length_drops_head(QNameDefault, Ch, Payload1, Payload2, Payload3).
+    check_max_length_drops_head(Config, QName, Ch, Payload1, Payload2, Payload3),
+    check_max_length_drops_head(Config, QNameDefault, Ch, Payload1, Payload2, Payload3).
 
 max_length_reject_confirm(Config) ->
     {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
@@ -1070,16 +1082,16 @@ max_length_reject_confirm(Config) ->
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = MaxLengthArgs ++ OverflowArgs}),
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameBytes, arguments = MaxLengthBytesArgs ++ OverflowArgs}),
     #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
-    check_max_length_drops_publish(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
-    check_max_length_rejects(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_drops_publish(Config, QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_rejects(Config, QName, Ch, <<"1">>, <<"2">>, <<"3">>),
 
     %% 80 bytes payload
     Payload1 = << <<"1">> || _ <- lists:seq(1, 80) >>,
     Payload2 = << <<"2">> || _ <- lists:seq(1, 80) >>,
     Payload3 = << <<"3">> || _ <- lists:seq(1, 80) >>,
 
-    check_max_length_drops_publish(QNameBytes, Ch, Payload1, Payload2, Payload3),
-    check_max_length_rejects(QNameBytes, Ch, Payload1, Payload2, Payload3).
+    check_max_length_drops_publish(Config, QNameBytes, Ch, Payload1, Payload2, Payload3),
+    check_max_length_rejects(Config, QNameBytes, Ch, Payload1, Payload2, Payload3).
 
 max_length_drop_publish(Config) ->
     {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
@@ -1093,16 +1105,17 @@ max_length_drop_publish(Config) ->
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = MaxLengthArgs ++ OverflowArgs}),
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameBytes, arguments = MaxLengthBytesArgs ++ OverflowArgs}),
     %% If confirms are not enable, publishes will still be dropped in reject_publish mode.
-    check_max_length_drops_publish(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_drops_publish(Config, QName, Ch, <<"1">>, <<"2">>, <<"3">>),
 
     %% 80 bytes payload
     Payload1 = << <<"1">> || _ <- lists:seq(1, 80) >>,
     Payload2 = << <<"2">> || _ <- lists:seq(1, 80) >>,
     Payload3 = << <<"3">> || _ <- lists:seq(1, 80) >>,
 
-    check_max_length_drops_publish(QNameBytes, Ch, Payload1, Payload2, Payload3).
+    check_max_length_drops_publish(Config, QNameBytes, Ch, Payload1, Payload2, Payload3).
 
-check_max_length_drops_publish(QName, Ch, Payload1, Payload2, Payload3) ->
+check_max_length_drops_publish(Config, QName, Ch, Payload1, Payload2, Payload3) ->
+    sync_mirrors(QName, Config),
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
     %% A single message is published and consumed
     amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
@@ -1122,7 +1135,8 @@ check_max_length_drops_publish(QName, Ch, Payload1, Payload2, Payload3) ->
     {#'basic.get_ok'{}, #amqp_msg{payload = Payload1}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
 
-check_max_length_rejects(QName, Ch, Payload1, Payload2, Payload3) ->
+check_max_length_rejects(Config, QName, Ch, Payload1, Payload2, Payload3) ->
+    sync_mirrors(QName, Config),
     amqp_channel:register_confirm_handler(Ch, self()),
     flush(),
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
@@ -1154,7 +1168,8 @@ check_max_length_rejects(QName, Ch, Payload1, Payload2, Payload3) ->
 
     {#'basic.get_ok'{}, #amqp_msg{payload = Payload2}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
 
-check_max_length_drops_head(QName, Ch, Payload1, Payload2, Payload3) ->
+check_max_length_drops_head(Config, QName, Ch, Payload1, Payload2, Payload3) ->
+    sync_mirrors(QName, Config),
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
     %% A single message is published and consumed
     amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
@@ -1174,6 +1189,12 @@ check_max_length_drops_head(QName, Ch, Payload1, Payload2, Payload3) ->
     {#'basic.get_ok'{}, #amqp_msg{payload = Payload3}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
 
+sync_mirrors(QName, Config) ->
+    case ?config(is_mirrored, Config) of
+        true ->
+            rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, [<<"sync_queue">>, QName]);
+        _ -> ok
+    end.
 
 %% ---------------------------------------------------------------------------
 %% rabbitmqctl helpers.
