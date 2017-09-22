@@ -264,7 +264,7 @@ init_with_backing_queue_state(Q = #amqqueue{exclusive_owner = Owner}, BQ, BQS,
                      msg_id_to_channel   = MTC},
     State2 = process_args_policy(State1),
     State3 = lists:foldl(fun (Delivery, StateN) ->
-                                 deliver_or_enqueue(Delivery, true, StateN)
+                                 maybe_deliver_or_enqueue(Delivery, true, StateN)
                          end, State2, Deliveries),
     notify_decorators(startup, State3),
     State3.
@@ -632,12 +632,22 @@ attempt_delivery(Delivery = #delivery{sender  = SenderPid,
                             State#q{consumers = Consumers})}
     end.
 
+maybe_deliver_or_enqueue(Delivery, Delivered, State = #q{overflow = Overflow}) ->
+    send_mandatory(Delivery), %% must do this before confirms
+    case {will_overflow(Delivery, State), Overflow} of
+        {true, reject_publish} ->
+            %% Drop publish and nack to publisher
+            nack_publish_no_space(Delivery, Delivered, State);
+        _ ->
+            %% Enqueue and maybe drop head later
+            deliver_or_enqueue(Delivery, Delivered, State)
+    end.
+
 deliver_or_enqueue(Delivery = #delivery{message = Message,
                                         sender  = SenderPid,
                                         flow    = Flow},
                    Delivered, State = #q{backing_queue       = BQ,
                                          backing_queue_state = BQS}) ->
-    send_mandatory(Delivery), %% must do this before confirms
     {Confirm, State1} = send_or_record_confirm(Delivery, State),
     Props = message_properties(Message, Confirm, State1),
     {IsDuplicate, BQS1} = BQ:is_duplicate(Message, BQS),
@@ -701,7 +711,7 @@ maybe_drop_head(AlreadyDropped, State = #q{backing_queue       = BQ,
 nack_publish_no_space(#delivery{confirm = true,
                                 sender = SenderPid,
                                 msg_seq_no = MsgSeqNo} = Delivery,
-                      _SlaveWhenPublished,
+                      _Delivered,
                       State = #q{ backing_queue = BQ,
                                   backing_queue_state = BQS,
                                   msg_id_to_channel   = MTC}) ->
@@ -709,7 +719,7 @@ nack_publish_no_space(#delivery{confirm = true,
     gen_server2:cast(SenderPid, {reject_publish, MsgSeqNo, self()}),
     State#q{ backing_queue_state = BQS1, msg_id_to_channel = MTC1 };
 nack_publish_no_space(#delivery{confirm = false},
-                      _SlaveWhenPublished, State) ->
+                      _Delivered, State) ->
     State.
 
 will_overflow(_, #q{max_length = undefined,
@@ -1297,7 +1307,7 @@ handle_cast({deliver,
                 Delivery = #delivery{sender = Sender,
                                      flow   = Flow},
                 SlaveWhenPublished},
-            State = #q{senders = Senders, overflow = Overflow}) ->
+            State = #q{senders = Senders}) ->
     Senders1 = case Flow of
     %% In both credit_flow:ack/1 we are acking messages to the channel
     %% process that sent us the message delivery. See handle_ch_down
@@ -1311,18 +1321,7 @@ handle_cast({deliver,
                    noflow -> Senders
                end,
     State1 = State#q{senders = Senders1},
-    case {will_overflow(Delivery, State1), Overflow} of
-        {false, _} ->
-            noreply(deliver_or_enqueue(Delivery, SlaveWhenPublished, State1));
-        %% Drop will be performed by deliver_or_enqueue
-        %% TODO: refactor to have explicit drop here.
-        {true, drop_head} ->
-            noreply(deliver_or_enqueue(Delivery, SlaveWhenPublished, State1));
-        %% TODO: deal with mandatory flag
-        {true, reject_publish} ->
-            send_mandatory(Delivery), %% Message is routed, but will be rejected
-            noreply(nack_publish_no_space(Delivery, SlaveWhenPublished, State1))
-    end;
+    noreply(maybe_deliver_or_enqueue(Delivery, SlaveWhenPublished, State1));
 %% [0] The second ack is since the channel thought we were a slave at
 %% the time it published this message, so it used two credits (see
 %% rabbit_amqqueue:deliver/2).
