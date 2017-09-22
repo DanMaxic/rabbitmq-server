@@ -116,7 +116,14 @@ take_one(PK, {P, S}) ->
         {value, {SKS, Value}} ->
             P1 = gb_trees:delete(PK, P),
             S1 = gb_sets:fold(
-                    fun(El, Acc) -> gb_trees:delete(El, Acc) end, S, SKS),
+                    fun(SK, Acc) ->
+                        {value, PKS} = gb_trees:lookup(SK, Acc),
+                        PKS1 = gb_sets:delete(PK, PKS),
+                        case gb_sets:is_empty(PKS1) of
+                            true  -> gb_trees:delete(SK, Acc);
+                            false -> gb_trees:update(SK, PKS1, Acc)
+                        end
+                    end, S, SKS),
             {[{PK, Value}], {P1, S1}};
         none -> {[], {P, S}}
     end.

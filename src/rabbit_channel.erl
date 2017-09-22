@@ -583,7 +583,7 @@ handle_cast({mandatory_received, MsgSeqNo}, State = #ch{mandatory = Mand}) ->
     %% NB: don't call noreply/1 since we don't want to send confirms.
     noreply_coalesce(State#ch{mandatory = dtree:drop(MsgSeqNo, Mand)});
 
-handle_cast({reject_publish, MsgSeqNo, QPid}, State = #ch{unconfirmed = UC}) ->
+handle_cast({reject_publish, MsgSeqNo, _QPid}, State = #ch{unconfirmed = UC}) ->
     %% It does not matter which queue rejected the message,
     %% if any queue rejected it - it should not be confirmed.
     {MXs, UC1} = dtree:take_one(MsgSeqNo, UC),
