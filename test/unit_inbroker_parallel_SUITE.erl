@@ -48,7 +48,10 @@ groups() ->
             ]},
           set_disk_free_limit_command,
           set_vm_memory_high_watermark_command,
-          topic_matching
+          topic_matching,
+          {queue_max_length, [], [max_length_drop_head,
+                                  max_length_reject_confirm,
+                                  max_length_drop_publish]}
         ]}
     ].
 
@@ -91,6 +94,14 @@ setup_file_handle_cache1() ->
     ok = file_handle_cache:set_limit(10),
     ok.
 
+end_per_group(queue_max_length, Config) ->
+    {_, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    amqp_channel:call(Ch, #'queue.delete'{queue = <<"max_length_reject_queue">>}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = <<"max_length_drop_publish_queue">>}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = <<"max_length_drop_head_queue">>}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = <<"max_length_default_drop_head_queue">>}),
+    rabbit_ct_client_helpers:close_channels_and_connection(Config, 0),
+    Config;
 end_per_group(Group, Config) ->
     case lists:member({group, Group}, all()) of
         true ->
@@ -1018,6 +1029,152 @@ set_vm_memory_high_watermark_command1(_Config) ->
                     )
     end.
 
+max_length_drop_head(Config) ->
+    {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    QName = <<"max_length_drop_head_queue">>,
+    QNameDefault = <<"max_length_default_drop_head_queue">>,
+    QNameBytes = <<"max_length_bytes_drop_head_queue">>,
+    QNameDefaultBytes = <<"max_length_bytes_default_drop_head_queue">>,
+
+    MaxLengthArgs = [{<<"x-max-length">>, long, 1}],
+    MaxLengthBytesArgs = [{<<"x-max-length-bytes">>, long, 100}],
+    OverflowArgs = [{<<"x-overflow">>, longstr, <<"drop_head">>}],
+    amqp_channel:call(Ch, #'queue.delete'{queue = QName}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = QNameDefault}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = QNameBytes}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = QNameDefaultBytes}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = MaxLengthArgs ++ OverflowArgs}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameDefault, arguments = MaxLengthArgs}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameBytes, arguments = MaxLengthBytesArgs ++ OverflowArgs}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameDefaultBytes, arguments = MaxLengthBytesArgs}),
+
+    check_max_length_drops_head(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_drops_head(QNameDefault, Ch, <<"1">>, <<"2">>, <<"3">>),
+
+    %% 80 bytes payload
+    Payload1 = << <<"1">> || _ <- lists:seq(1, 80) >>,
+    Payload2 = << <<"2">> || _ <- lists:seq(1, 80) >>,
+    Payload3 = << <<"3">> || _ <- lists:seq(1, 80) >>,
+    check_max_length_drops_head(QName, Ch, Payload1, Payload2, Payload3),
+    check_max_length_drops_head(QNameDefault, Ch, Payload1, Payload2, Payload3).
+
+max_length_reject_confirm(Config) ->
+    {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    QName = <<"max_length_reject_queue">>,
+    QNameBytes = <<"max_length_bytes_reject_queue">>,
+    MaxLengthArgs = [{<<"x-max-length">>, long, 1}],
+    MaxLengthBytesArgs = [{<<"x-max-length-bytes">>, long, 100}],
+    OverflowArgs = [{<<"x-overflow">>, longstr, <<"reject_publish">>}],
+    amqp_channel:call(Ch, #'queue.delete'{queue = QName}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = QNameBytes}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = MaxLengthArgs ++ OverflowArgs}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameBytes, arguments = MaxLengthBytesArgs ++ OverflowArgs}),
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    check_max_length_drops_publish(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+    check_max_length_rejects(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+
+    %% 80 bytes payload
+    Payload1 = << <<"1">> || _ <- lists:seq(1, 80) >>,
+    Payload2 = << <<"2">> || _ <- lists:seq(1, 80) >>,
+    Payload3 = << <<"3">> || _ <- lists:seq(1, 80) >>,
+
+    check_max_length_drops_publish(QNameBytes, Ch, Payload1, Payload2, Payload3),
+    check_max_length_rejects(QNameBytes, Ch, Payload1, Payload2, Payload3).
+
+max_length_drop_publish(Config) ->
+    {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    QName = <<"max_length_drop_publish_queue">>,
+    QNameBytes = <<"max_length_bytes_drop_publish_queue">>,
+    MaxLengthArgs = [{<<"x-max-length">>, long, 1}],
+    MaxLengthBytesArgs = [{<<"x-max-length-bytes">>, long, 100}],
+    OverflowArgs = [{<<"x-overflow">>, longstr, <<"reject_publish">>}],
+    amqp_channel:call(Ch, #'queue.delete'{queue = QName}),
+    amqp_channel:call(Ch, #'queue.delete'{queue = QNameBytes}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = MaxLengthArgs ++ OverflowArgs}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QNameBytes, arguments = MaxLengthBytesArgs ++ OverflowArgs}),
+    %% If confirms are not enable, publishes will still be dropped in reject_publish mode.
+    check_max_length_drops_publish(QName, Ch, <<"1">>, <<"2">>, <<"3">>),
+
+    %% 80 bytes payload
+    Payload1 = << <<"1">> || _ <- lists:seq(1, 80) >>,
+    Payload2 = << <<"2">> || _ <- lists:seq(1, 80) >>,
+    Payload3 = << <<"3">> || _ <- lists:seq(1, 80) >>,
+
+    check_max_length_drops_publish(QNameBytes, Ch, Payload1, Payload2, Payload3).
+
+check_max_length_drops_publish(QName, Ch, Payload1, Payload2, Payload3) ->
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    %% A single message is published and consumed
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload1}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+
+    %% Message 2 is dropped, message 1 stays
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload2}),
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload1}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+
+    %% Messages 2 and 3 are dropped, message 1 stays
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload2}),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload3}),
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload1}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
+
+check_max_length_rejects(QName, Ch, Payload1, Payload2, Payload3) ->
+    amqp_channel:register_confirm_handler(Ch, self()),
+    flush(),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    %% First message can be enqueued and acks
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    receive #'basic.ack'{} -> ok
+    after 1000 -> error(expected_ack)
+    end,
+
+    %% The message cannot be enqueued and nacks
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload2}),
+    receive #'basic.nack'{} -> ok
+    after 1000 -> error(expected_nack)
+    end,
+
+    %% The message cannot be enqueued and nacks
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload3}),
+    receive #'basic.nack'{} -> ok
+    after 1000 -> error(expected_nack)
+    end,
+
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload1}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+
+    %% Now we can publish message 2.
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload2}),
+    receive #'basic.ack'{} -> ok
+    after 1000 -> error(expected_ack)
+    end,
+
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload2}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
+
+check_max_length_drops_head(QName, Ch, Payload1, Payload2, Payload3) ->
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    %% A single message is published and consumed
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload1}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+
+    %% Message 1 is replaced by message 2
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload2}),
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload2}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+
+    %% Messages 1 and 2 are replaced
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload1}),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload2}),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = QName}, #amqp_msg{payload = Payload3}),
+    {#'basic.get_ok'{}, #amqp_msg{payload = Payload3}} = amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+    #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
+
+
 %% ---------------------------------------------------------------------------
 %% rabbitmqctl helpers.
 %% ---------------------------------------------------------------------------
@@ -1031,3 +1188,8 @@ expand_options(As, Bs) ->
                             false -> [A | R]
                         end
                 end, Bs, As).
+
+flush() ->
+    receive _ -> flush()
+    after 10 -> ok
+    end.
